@@ -1,0 +1,5 @@
+# Alternative pip-compatible requirements
+# Use this if you prefer pip install -r requirements.txt
+
+rag-core[chroma,qdrant] @ git+https://github.com/pkutsch/RAGMcpServerCore.git
+mcp

@@ -1,0 +1,22 @@
+notes/.ignore/
+
+# Virtual Environment
+.venv/
+
+# Environment Variables (secrets)
+.env
+
+# Data directory (uploads, vector store, logs)
+data/
+
+# Python cache
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo

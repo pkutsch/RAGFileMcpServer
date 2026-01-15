@@ -1,0 +1,76 @@
+# =============================================================================
+# RAG File MCP Server - Docker Compose
+# =============================================================================
+# Orchestrates Streamlit UI and MCP Server services
+
+version: "3.8"
+
+services:
+  # ---------------------------------------------------------------------------
+  # Streamlit Web Interface
+  # ---------------------------------------------------------------------------
+  streamlit:
+    build:
+      context: ..
+      dockerfile: RAGFileMcpServer/Dockerfile
+    container_name: rag-file-streamlit
+    command: >
+      streamlit run src/streamlit_app.py --server.port=${STREAMLIT_PORT:-8501} --server.address=${STREAMLIT_HOST:-0.0.0.0} --server.headless=true --browser.gatherUsageStats=false
+    ports:
+      - "${STREAMLIT_PORT:-8501}:${STREAMLIT_PORT:-8501}"
+    volumes:
+      - ./data:/app/data
+      - ./.env:/app/.env:ro
+    environment:
+      - PYTHONPATH=/app
+      - STREAMLIT_PORT=${STREAMLIT_PORT:-8501}
+      - STREAMLIT_HOST=${STREAMLIT_HOST:-0.0.0.0}
+      - UPLOAD_DIR=/app/data/uploads
+      - LOG_DB_PATH=/app/data/logs.db
+      - CHROMA_PERSIST_DIR=/app/data/chroma
+    env_file:
+      - .env
+    networks:
+      - rag-network
+    restart: unless-stopped
+    healthcheck:
+      test: [ "CMD", "curl", "-f", "http://localhost:${STREAMLIT_PORT:-8501}/_stcore/health" ]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 10s
+
+  # ---------------------------------------------------------------------------
+  # MCP Server (STDIO mode - for CLI integration)
+  # ---------------------------------------------------------------------------
+  mcp-server:
+    build:
+      context: ..
+      dockerfile: RAGFileMcpServer/Dockerfile
+    container_name: rag-file-mcp-server
+    command: python -m src.server
+    volumes:
+      - ./data:/app/data
+      - ./.env:/app/.env:ro
+    environment:
+      - PYTHONPATH=/app
+      - UPLOAD_DIR=/app/data/uploads
+      - LOG_DB_PATH=/app/data/logs.db
+      - CHROMA_PERSIST_DIR=/app/data/chroma
+    env_file:
+      - .env
+    networks:
+      - rag-network
+    restart: unless-stopped
+    # Note: MCP server uses STDIO, so no port mapping needed
+    # For SSE transport, uncomment below:
+    # ports:
+    #   - "${MCP_SERVER_PORT:-8000}:${MCP_SERVER_PORT:-8000}"
+
+networks:
+  rag-network:
+    driver: bridge
+
+volumes:
+  rag-data:
+    driver: local

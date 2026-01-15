@@ -1,0 +1,26 @@
+[project]
+name = "rag-file-mcp-server"
+version = "0.1.0"
+description = "RAG File MCP Server - MCP server providing RAG support with file-based data sources"
+requires-python = ">=3.12.7"
+dependencies = [
+    "rag-core[chroma,qdrant] @ git+https://github.com/pkutsch/RAGMcpServerCore.git",
+    "mcp",
+    "pypdf>=4.0.0",
+    "chardet>=5.2.0",
+    "streamlit>=1.40.0",
+    "python-dotenv>=1.0.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0.0",
+    "pytest-asyncio>=0.23.0",
+]
+
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+where = ["src"]
