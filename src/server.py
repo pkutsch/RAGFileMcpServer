@@ -38,10 +38,23 @@ logger = logging.getLogger(__name__)
 # Initialize MCP server
 server = Server("rag-file-mcp-server")
 
+
 # Global retriever instance (initialized on startup)
 _retriever: Retriever | None = None
 _config: RAGConfig | None = None
 _upload_dir: Path | None = None
+
+# Tool Prefix Configuration
+# This allows running multiple instances of the server (e.g. "finance_", "medical_")
+# preserving global tool uniqueness for the MCP client.
+try:
+    tool_prefix = os.environ.get("TOOL_PREFIX", "")
+except Exception:
+    tool_prefix = ""
+
+if tool_prefix:
+    logger.info(f"Using tool prefix: '{tool_prefix}'")
+
 
 
 def get_upload_dir() -> Path:
@@ -90,7 +103,7 @@ async def list_tools() -> list[Tool]:
     """List available tools."""
     return [
         Tool(
-            name="search_documents",
+            name=f"{tool_prefix}search_documents",
             description=(
                 "[CATEGORY: document_search] "
                 "Search the user's PRIVATE and INTERNAL CORPORATE knowledge base. "
@@ -118,7 +131,7 @@ async def list_tools() -> list[Tool]:
             },
         ),
         Tool(
-            name="list_documents",
+            name=f"{tool_prefix}list_documents",
             description=(
                 "[CATEGORY: document_search] "
                 "List all documents in the user's private knowledge base. "
@@ -130,7 +143,7 @@ async def list_tools() -> list[Tool]:
             },
         ),
         Tool(
-            name="ingest_document",
+            name=f"{tool_prefix}ingest_document",
             description=(
                 "[CATEGORY: file_operations] "
                 "Ingest a document into the RAG system."
@@ -147,7 +160,7 @@ async def list_tools() -> list[Tool]:
             },
         ),
         Tool(
-            name="get_document_count",
+            name=f"{tool_prefix}get_document_count",
             description="Get the total number of document chunks in the index.",
             inputSchema={
                 "type": "object",
@@ -155,7 +168,7 @@ async def list_tools() -> list[Tool]:
             },
         ),
         Tool(
-            name="rebuild_index",
+            name=f"{tool_prefix}rebuild_index",
             description=(
                 "Completely rebuild the RAG index from the uploads directory. "
                 "WARNING: This is a destructive operation that clears the existing index "
@@ -174,19 +187,22 @@ async def call_tool(name: str, arguments: dict[str, Any]) -> list[TextContent]:
     """Handle tool calls."""
     logger.info(f"Tool called: {name} with arguments: {arguments}")
     
+    # Strip prefix for easier matching internally, or just match with prefix
+    # Matching with prefix is safer to ensure we don't handle tools not meant for us if sharing names somehow
+    
     try:
-        if name == "search_documents":
+        if name == f"{tool_prefix}search_documents":
             result = await search_documents(
                 query=arguments["query"],
                 k=arguments.get("k", 5),
             )
-        elif name == "list_documents":
+        elif name == f"{tool_prefix}list_documents":
             result = await list_uploaded_documents()
-        elif name == "ingest_document":
+        elif name == f"{tool_prefix}ingest_document":
             result = await ingest_document(filename=arguments["filename"])
-        elif name == "get_document_count":
+        elif name == f"{tool_prefix}get_document_count":
             result = await get_document_count()
-        elif name == "rebuild_index":
+        elif name == f"{tool_prefix}rebuild_index":
             result = await rebuild_index()
         else:
             result = {"error": f"Unknown tool: {name}"}
@@ -387,14 +403,14 @@ async def list_resources() -> list[Resource]:
     """List available resources."""
     return [
         Resource(
-            uri="rag://documents/list",
-            name="Document List",
+            uri=f"rag://{tool_prefix}documents/list",
+            name=f"{tool_prefix}Document List",
             description="List of all uploaded documents",
             mimeType="application/json",
         ),
         Resource(
-            uri="rag://config/status",
-            name="Configuration Status",
+            uri=f"rag://{tool_prefix}config/status",
+            name=f"{tool_prefix}Configuration Status",
             description="Current RAG configuration and status",
             mimeType="application/json",
         ),
@@ -406,11 +422,11 @@ async def read_resource(uri: str) -> str:
     """Read a resource by URI."""
     import json
     
-    if uri == "rag://documents/list":
+    if uri == f"rag://{tool_prefix}documents/list":
         result = await list_uploaded_documents()
         return json.dumps(result, indent=2)
     
-    elif uri == "rag://config/status":
+    elif uri == f"rag://{tool_prefix}config/status":
         global _config
         # Force refresh for status check
         retriever = await get_retriever(force_refresh=True)
