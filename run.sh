@@ -36,9 +36,20 @@ fi
 # Load environment variables from .env if it exists
 if [ -f .env ]; then
     echo "Loading environment variables from .env..."
-    set -a
-    source <(grep -v '^\s*#' .env | sed 's/#.*//' | grep -v '^\s*$')
-    set +a
+    # Read .env line by line, skip comments and empty lines, export each variable
+    while IFS= read -r line || [ -n "$line" ]; do
+        # Skip empty lines and comments
+        [[ -z "$line" || "$line" =~ ^[[:space:]]*# ]] && continue
+        # Remove inline comments (but be careful with values containing #)
+        line="${line%%#*}"
+        # Trim whitespace
+        line="${line#"${line%%[![:space:]]*}"}"
+        line="${line%"${line##*[![:space:]]}"}"
+        # Skip if empty after trimming
+        [[ -z "$line" ]] && continue
+        # Export the variable
+        export "$line"
+    done < .env
 fi
 
 # Default ports

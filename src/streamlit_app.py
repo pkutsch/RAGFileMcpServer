@@ -92,9 +92,7 @@ st.markdown("""
 """, unsafe_allow_html=True)
 
 
-# Initialize session state
-if "retriever" not in st.session_state:
-    st.session_state.retriever = None
+# Initialize session state without retriever caching
 if "config" not in st.session_state:
     st.session_state.config = None
 if "log_manager" not in st.session_state:
@@ -110,18 +108,21 @@ def get_upload_dir() -> Path:
 
 
 async def get_retriever() -> Retriever:
-    """Get or create the retriever instance."""
-    if st.session_state.retriever is None:
-        config = RAGConfig()
-        st.session_state.config = config
-        
-        embedding = OllamaEmbedding(config)
-        store = ChromaVectorStore(persist_dir=config.chroma_persist_dir)
-        chunker = FixedSizeChunker(config)
-        
-        st.session_state.retriever = Retriever(embedding, store, chunker)
+    """Get a fresh retriever instance.
     
-    return st.session_state.retriever
+    We do not cache this in session_state because Streamlit's execution model
+    combined with run_async creates new event loops, which causes issues with
+    cached async clients (like httpx used by Ollama) bound to closed loops.
+    """
+    config = RAGConfig()
+    # Update cached config
+    st.session_state.config = config
+    
+    embedding = OllamaEmbedding(config)
+    store = ChromaVectorStore(persist_dir=config.chroma_persist_dir)
+    chunker = FixedSizeChunker(config)
+    
+    return Retriever(embedding, store, chunker)
 
 
 def run_async(coro):
@@ -244,6 +245,10 @@ elif page == "📁 Documents":
                     st.text(f"Type: {file_path.suffix}")
                 
                 with col2:
+                    if st.button("👀 View Content", key=f"view_{file_path.name}"):
+                        st.session_state[f"view_content_{file_path.name}"] = \
+                            not st.session_state.get(f"view_content_{file_path.name}", False)
+                    
                     if st.button("🔄 Re-index", key=f"reindex_{file_path.name}"):
                         with st.spinner("Re-indexing..."):
                             try:
@@ -263,6 +268,27 @@ elif page == "📁 Documents":
                     if st.button("🗑️ Delete", key=f"delete_{file_path.name}"):
                         file_path.unlink()
                         st.rerun()
+
+            # Display content if toggled
+            if st.session_state.get(f"view_content_{file_path.name}", False):
+                with st.spinner("Loading content..."):
+                    try:
+                        parser = get_parser_for_file(file_path.name)
+                        if parser:
+                            parsed = parser.parse(file_path)
+                            st.markdown("### Document Content")
+                            st.text_area(
+                                label="Content",
+                                value=parsed.text,
+                                height=400,
+                                label_visibility="collapsed",
+                                disabled=True,
+                                key=f"content_{file_path.name}"
+                            )
+                        else:
+                            st.warning("No parser available for this file type.")
+                    except Exception as e:
+                        st.error(f"Failed to read content: {e}")
     else:
         st.info("No files uploaded yet. Go to File Upload to add documents.")
 
@@ -340,6 +366,69 @@ elif page == "⚙️ Configuration":
     st.text(f"Upload Dir: {os.getenv('UPLOAD_DIR', './data/uploads')}")
     st.text(f"Max Size: {os.getenv('MAX_UPLOAD_SIZE_MB', '50')} MB")
     st.text(f"Extensions: {os.getenv('ALLOWED_EXTENSIONS', 'pdf,txt,md,rst')}")
+
+    st.markdown("### Index Management")
+    st.warning("⚠️ re-building the index completes clears and re-ingests all documents.")
+    if st.button("🔴 Rebuild Index", type="secondary"):
+        with st.spinner("Rebuilding index... This may take a while."):
+            try:
+                # Clear existing index in a dedicated async context
+                async def clear_index():
+                    r = await get_retriever()
+                    await r.store.clear()
+                
+                run_async(clear_index())
+                
+                upload_dir = get_upload_dir()
+                files = list(upload_dir.iterdir()) if upload_dir.exists() else []
+                files = [f for f in files if f.is_file()]
+                
+                if not files:
+                    st.warning("No files to ingest.")
+                else:
+                    progress_bar = st.progress(0)
+                    status_text = st.empty()
+                    
+                    success_count = 0
+                    for i, file_path in enumerate(files):
+                        status_text.text(f"Processing {file_path.name}...")
+                        try:
+                            # Define async task for single file ingestion
+                            # ensuring retriever is created and used in the same loop
+                            async def ingest_file():
+                                parser = get_parser_for_file(file_path.name)
+                                if parser:
+                                    parsed = parser.parse(file_path)
+                                    
+                                    metadata = {
+                                        "source": str(file_path),
+                                        "filename": file_path.name,
+                                        **parsed.metadata,
+                                    }
+                                    
+                                    # Get fresh retriever in THIS loop
+                                    r = await get_retriever()
+                                    await r.add_document(
+                                        text=parsed.text, 
+                                        metadata=metadata
+                                    )
+                                    return True
+                                return False
+                                
+                            if run_async(ingest_file()):
+                                success_count += 1
+                                
+                        except Exception as e:
+                            st.error(f"Failed {file_path.name}: {e}")
+                        
+                        progress_bar.progress((i + 1) / len(files))
+                    
+                    st.success(f"✅ Rebuild complete! Processed {success_count}/{len(files)} files.")
+                    status_text.empty()
+                    progress_bar.empty()
+                    
+            except Exception as e:
+                st.error(f"Rebuild failed: {e}")
 
 
 # Page: Logs

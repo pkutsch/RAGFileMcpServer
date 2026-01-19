@@ -53,12 +53,21 @@ def get_upload_dir() -> Path:
     return _upload_dir
 
 
-async def get_retriever() -> Retriever:
-    """Get or create the retriever instance."""
+async def get_retriever(force_refresh: bool = False) -> Retriever:
+    """Get or create the retriever instance.
+    
+    Args:
+        force_refresh: Whether to force re-initialization of the retriever.
+                      Useful when the underlying vector store might have changed
+                      (e.g., updated by another process like Streamlit).
+    """
     global _retriever, _config
     
-    if _retriever is None:
-        logger.info("Initializing RAG components...")
+    if _retriever is None or force_refresh:
+        if force_refresh:
+            logger.info("Refreshing RAG components...")
+        else:
+            logger.info("Initializing RAG components...")
         
         _config = RAGConfig()
         embedding = OllamaEmbedding(_config)
@@ -68,7 +77,7 @@ async def get_retriever() -> Retriever:
         _retriever = Retriever(embedding, store, chunker)
         
         logger.info(
-            f"RAG components initialized: "
+            f"RAG components {'refreshed' if force_refresh else 'initialized'}: "
             f"embedding={_config.embedding_provider}, "
             f"store={_config.vector_store_type}"
         )
@@ -83,15 +92,21 @@ async def list_tools() -> list[Tool]:
         Tool(
             name="search_documents",
             description=(
-                "Search indexed documents using semantic similarity. "
-                "Returns the most relevant document chunks matching the query."
+                "[CATEGORY: document_search] "
+                "Search the user's PRIVATE and INTERNAL CORPORATE knowledge base. "
+                "This contains uploaded documents, internal company files, project notes, "
+                "policies, procedures, and confidential information NOT available on the internet. "
+                "IMPORTANT: Use this tool FIRST when the user asks about their personal files, "
+                "internal projects, company-specific information, proprietary data, "
+                "or any topic that might be documented in their private collection. "
+                "This should be preferred over web search for internal/private queries."
             ),
             inputSchema={
                 "type": "object",
                 "properties": {
                     "query": {
                         "type": "string",
-                        "description": "The search query text",
+                        "description": "The search query text - be descriptive for better semantic matching",
                     },
                     "k": {
                         "type": "integer",
@@ -104,7 +119,11 @@ async def list_tools() -> list[Tool]:
         ),
         Tool(
             name="list_documents",
-            description="List all indexed documents with their metadata.",
+            description=(
+                "[CATEGORY: document_search] "
+                "List all documents in the user's private knowledge base. "
+                "Use this to discover what internal/corporate documents are available for searching."
+            ),
             inputSchema={
                 "type": "object",
                 "properties": {},
@@ -113,8 +132,8 @@ async def list_tools() -> list[Tool]:
         Tool(
             name="ingest_document",
             description=(
-                "Ingest a document from the uploads directory into the RAG index. "
-                "Supports PDF, TXT, MD, and RST files."
+                "[CATEGORY: file_operations] "
+                "Ingest a document into the RAG system."
             ),
             inputSchema={
                 "type": "object",
@@ -130,6 +149,18 @@ async def list_tools() -> list[Tool]:
         Tool(
             name="get_document_count",
             description="Get the total number of document chunks in the index.",
+            inputSchema={
+                "type": "object",
+                "properties": {},
+            },
+        ),
+        Tool(
+            name="rebuild_index",
+            description=(
+                "Completely rebuild the RAG index from the uploads directory. "
+                "WARNING: This is a destructive operation that clears the existing index "
+                "and re-ingests all files. Use this to fix synchronization issues."
+            ),
             inputSchema={
                 "type": "object",
                 "properties": {},
@@ -155,9 +186,14 @@ async def call_tool(name: str, arguments: dict[str, Any]) -> list[TextContent]:
             result = await ingest_document(filename=arguments["filename"])
         elif name == "get_document_count":
             result = await get_document_count()
+        elif name == "rebuild_index":
+            result = await rebuild_index()
         else:
             result = {"error": f"Unknown tool: {name}"}
         
+        if isinstance(result, str):
+            return [TextContent(type="text", text=result)]
+            
         import json
         return [TextContent(type="text", text=json.dumps(result, indent=2))]
         
@@ -176,21 +212,25 @@ async def search_documents(query: str, k: int = 5) -> dict[str, Any]:
     Returns:
         Search results with scores and metadata.
     """
-    retriever = await get_retriever()
+    # Force refresh to ensure we see the latest changes from other processes (e.g. Streamlit)
+    retriever = await get_retriever(force_refresh=True)
     results = await retriever.search(query, k=k)
     
-    return {
-        "query": query,
-        "results": [
-            {
-                "text": r.text,
-                "score": r.score,
-                "metadata": r.metadata,
-            }
-            for r in results
-        ],
-        "count": len(results),
-    }
+    # Format results as a single readable string for the LLM
+    # This prevents "JSON Overload" and helps the model rely on the context
+    formatted_results = []
+    
+    for i, r in enumerate(results):
+        source_name = r.metadata.get("filename", "Unknown Source")
+        formatted_results.append(
+            f"--- Result {i+1} (Source: {source_name}, Relevance: {r.score:.2f}) ---\n"
+            f"{r.text}\n"
+        )
+    
+    if not formatted_results:
+        return "No relevant documents found."
+        
+    return "\n".join(formatted_results)
 
 
 async def list_uploaded_documents() -> dict[str, Any]:
@@ -242,6 +282,7 @@ async def ingest_document(filename: str) -> dict[str, Any]:
     parsed = parser.parse(file_path)
     
     # Add to retriever
+    # We might want to refresh here too, but it's less critical as we are adding new data
     retriever = await get_retriever()
     
     metadata = {
@@ -265,13 +306,75 @@ async def ingest_document(filename: str) -> dict[str, Any]:
     }
 
 
+async def rebuild_index() -> dict[str, Any]:
+    """Completely rebuild the RAG index from uploaded files.
+    
+    Returns:
+        Rebuild statistics.
+    """
+    logger.info("Starting index rebuild...")
+    
+    # Get retriever (force refresh)
+    retriever = await get_retriever(force_refresh=True)
+    
+    # Clear existing index
+    await retriever.store.clear()
+    logger.info("Cleared existing index")
+    
+    upload_dir = get_upload_dir()
+    files_processed = 0
+    chunks_added = 0
+    errors = []
+    
+    for file_path in upload_dir.iterdir():
+        if not file_path.is_file():
+            continue
+            
+        try:
+            parser = get_parser_for_file(file_path.name)
+            if not parser:
+                logger.warning(f"Skipping {file_path.name}: No parser found")
+                continue
+                
+            parsed = parser.parse(file_path)
+            
+            metadata = {
+                "source": str(file_path),
+                "filename": file_path.name,
+                **parsed.metadata,
+            }
+            
+            ids = await retriever.add_document(
+                text=parsed.text,
+                metadata=metadata,
+            )
+            
+            files_processed += 1
+            chunks_added += len(ids)
+            logger.info(f"Re-ingested {file_path.name}: {len(ids)} chunks")
+            
+        except Exception as e:
+            logger.error(f"Failed to re-ingest {file_path.name}: {e}")
+            errors.append(f"{file_path.name}: {str(e)}")
+            
+    logger.info(f"Index rebuild complete. Files: {files_processed}, Chunks: {chunks_added}")
+    
+    return {
+        "status": "success",
+        "files_processed": files_processed,
+        "chunks_added": chunks_added,
+        "errors": errors,
+    }
+
+
 async def get_document_count() -> dict[str, Any]:
     """Get the number of documents in the index.
     
     Returns:
         Document count.
     """
-    retriever = await get_retriever()
+    # Force refresh to get accurate count including external updates
+    retriever = await get_retriever(force_refresh=True)
     count = await retriever.count()
     
     return {
@@ -309,7 +412,8 @@ async def read_resource(uri: str) -> str:
     
     elif uri == "rag://config/status":
         global _config
-        retriever = await get_retriever()
+        # Force refresh for status check
+        retriever = await get_retriever(force_refresh=True)
         count = await retriever.count()
         
         return json.dumps({
